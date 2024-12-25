@@ -77,3 +77,23 @@ serialize(new demo());   =>  O:4:"demo":2:{s:4:"name";s:4:"rong";s:3:"age";N;}
 #### 绕过正则表达式
 
 ​	`O:+4`：一般会匹配"O:\d"来拦截攻击
+
+## Java 反序列化漏洞
+
+![](./images/serialize.png)
+
+使用场景：持久化内存数据、网络传输对象、远程方法调用
+
+序列化：`java.io.ObjectOutputStream.writeObject()`
+
+反序列化：`java.io.ObjectInputStream.readObject()`
+
+利用思路：（1）利用自定义的 readObject() 方法执行代码
+
+​				（2）寻找重写了 readObject() 方法的类
+
+```
+package: sun.reflect.annotation;  >  AnnotationInvocationHandler
+package: javax.management;  >  BadAttributeValueExpException
+```
+
