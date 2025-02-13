@@ -93,7 +93,74 @@ model = AutoModel.from_pretrained(model_name)
 model = AutoModel.from_pretrained(model_name)
 ```
 
-​		实际上 `AutoModel.from_pretrained()` 其实是调用了父类 `_BaseAutoModelClass` 里面的 `from_pretrained` 方法。该父类位于 `transformers/models/auto/auto_factory.py` 文件中
+​		实际上 `AutoModel.from_pretrained()` 其实是调用了父类 `_BaseAutoModelClass` 里面的 `from_pretrained` 方法。该父类位于 `transformers/models/auto/auto_factory.py` 文件中，根据代码逻辑，先加载配置文件。
+
+## 加载配置文件
+
+​		首先通过 `AutoConfig` 类加载对应的配置文件。
+
+```python
+config, kwargs = AutoConfig.from_pretrained(
+                pretrained_model_name_or_path,
+                return_unused_kwargs=True,
+                trust_remote_code=trust_remote_code,
+                code_revision=code_revision,
+                _commit_hash=commit_hash,
+                **hub_kwargs,
+                **kwargs,
+            )
+```
+
+​		该类位于 `transformers/models/auto/configuration_auto.py` 文件中，在该类的 `from_pretrained()` 方法中通过如下代码加载模型配置参数：
+
+```python
+config_dict, unused_kwargs = PretrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
+```
+
+​		而 `PretrainedConfig` 类位于 `transformers/configuration_utils.py` 文件中，在 `get_config_dict()` 方法中，实际上调用的是 `_get_config_dict()` 方法，该方法部分关键源代码如下：
+
+```python
+if os.path.isfile(os.path.join(subfolder, pretrained_model_name_or_path)):
+    # 比较特殊的情况下配置文件是一个本地文件
+    resolved_config_file = pretrained_model_name_or_path
+    is_local = True
+elif is_remote_url(pretrained_model_name_or_path):
+    # 如果是需要下载的配置文件，这里会是一个远程的 url
+    configuration_file = pretrained_model_name_or_path if gguf_file is None else gguf_file
+    # 通过 download_url() 方法下载配置文件
+    resolved_config_file = download_url(pretrained_model_name_or_path)
+...
+try:
+    if gguf_file:
+        config_dict = load_gguf_checkpoint(resolved_config_file, return_tensors=False)["config"]
+    else:
+        # Load config dict
+        config_dict = cls._dict_from_json_file(resolved_config_file)
+...
+return config_dict, kwargs
+```
+
+​		通过 `download_url()` 方法下载文件时，源代码如下：
+
+```python
+def download_url(url, proxies=None):
+	tmp_fd, tmp_file = tempfile.mkstemp()
+    with os.fdopen(tmp_fd, "wb") as f:
+        http_get(url, f, proxies=proxies)
+    return tmp_file
+```
+
+​		这里返回的 `tmp_file` 实际上是 `tmp_fd` 的路径，会被 `resolved_config_file` 接收，根据 `gguf_file` 的标记，如果是 `gguf` 格式文件，则被 `load_gguf_checkpoint()` 方法处理，如果不是则由 `_dict_from_json_file()` 方法处理。
+
+### load_gguf_checkpoint()方法
+
+​		该方法位于文件 `transformers/modeling_gguf_pytorch_utils/py` 文件中，主要用于从 `gguf` 格式文件还原配置参数
+
+- [ ] 阅读laod_gguf_checkpoint()源码
+
+### _dict_from_json_file() 方法
+
+​		该方法主要用于从 `json` 格式文件中还原配置参数
 
 ## 加载预训练模型
 
@@ -122,82 +189,40 @@ raise ValueError(
 
 ### 加载远程模型
 
-​		如果加载的是远程仓库的模型且被信任的话，就是第一个 `if` 分支。首先通过 `c
+​		如果加载的是远程仓库的模型且被信任的话，就是第一个 `if` 分支。首先通过 `config.auto_map` 从预训练模型的映射中获取对应的模型类，然后通过 `get_class_from_dynamic_module()` 函数，加载该模型类。该函数位于 `transformers/dynamic_module_utils.py` 文件中，部分关键代码如下：
+
+```python
+if "--" in class_reference:
+	repo_id, class_reference = class_reference.split("--")
+else:
+	repo_id = pretrained_model_name_or_path
+...
+final_module = get_cached_module_file(
+        repo_id,
+        module_file + ".py",
+        cache_dir=cache_dir,
+        force_download=force_download,
+        resume_download=resume_download,
+        proxies=proxies,
+        token=token,
+        revision=code_revision,
+        local_files_only=local_files_only,
+        repo_type=repo_type,
+    )
+return get_class_in_module(class_name, final_module, force_reload=force_download)
+```
+
+​		可见实际上调用的是`get_cached_module_file()` 方法。在该方法中面对远程模型时，会先检测缓存中有无该文件，没有的话就调用 `cached_file()` 方法，而在 `cached_file()` 方法中，会调用 `hf_hub_download()` 方法来下载。该方法主要用于本地缓存中没有的文件，最终返回的是下载到本地后文件的路径。而后被返回到 `get_cached_module_file()` 方法中，该方法后续会根据下载的模型创建动态模块，将解析后的模块文件及其依赖文件复制到缓存目录中，最后返回缓存模块文件的路径给 `get_class_from_module()` 方法。
+
+​		而后在 `get_class_from_dynamic_module()` 方法中，最后会返回模块中的类名给到 `_BaseAutoModelClass.from_pretrained()` 方法中的 `model_class`
 
 ### 加载本地模型
 
 ​		如果加载的是本地下载的预训练模型，则是 `elif` 分支，会先利用配置文件 `config.json` 中的 `architecrtures` 这个属性来匹配要加载的模型（调用 `_get_model_class` 方法），然后调用模型类 `model_class` 的 `from_pretrained` 方法来加载模型。
 
-## 加载配置文件
-
-​		，首先通过 `AutoConfig` 类加载对应的配置文件。
-
-```python
-config, kwargs = AutoConfig.from_pretrained(
-                pretrained_model_name_or_path,
-                return_unused_kwargs=True,
-                trust_remote_code=trust_remote_code,
-                code_revision=code_revision,
-                _commit_hash=commit_hash,
-                **hub_kwargs,
-                **kwargs,
-            )
-```
-
-​		该类位于 `transformers/models/auto/configuration_auto.py` 文件中，在该类的 `from_pretrained()` 方法中通过如下代码加载模型配置参数：
-
-```python
-config_dict, unused_kwargs = PretrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
-```
-
-​		而 `PretrainedConfig` 类位于 `transformers/configuration_utils.py` 文件中，在 `get_config_dict()` 方法中，实际上调用的是 `_get_config_dict()` 方法，该方法部分关键源代码如下：
-
-```python
-is_local = os.path.isdir(pretrained_model_name_or_path)
-if os.path.isfile(os.path.join(subfolder, pretrained_model_name_or_path)):
-    # Special case when pretrained_model_name_or_path is a local file
-    resolved_config_file = pretrained_model_name_or_path
-    is_local = True
-elif is_remote_url(pretrained_model_name_or_path):
-    # 如果需要下载的配置文件，这里会是一个远程的 url
-    configuration_file = pretrained_model_name_or_path if gguf_file is None else gguf_file
-    # 通过 download_url() 方法下载配置文件
-    resolved_config_file = download_url(pretrained_model_name_or_path)
-else:
-    configuration_file = kwargs.pop("_configuration_file", CONFIG_NAME) if gguf_file is None else gguf_file
-    try:
-        # Load from local folder or from cache or download from model Hub and cache
-        resolved_config_file = cached_file(
-            pretrained_model_name_or_path,
-            configuration_file,
-            cache_dir=cache_dir,
-            force_download=force_download,
-            proxies=proxies,
-            resume_download=resume_download,
-            local_files_only=local_files_only,
-            token=token,
-            user_agent=user_agent,
-            revision=revision,
-            subfolder=subfolder,
-            _commit_hash=commit_hash,
-        )
-```
-
-​		通过 `download_url()` 方法下载文件时，源代码如下：
-
-```python
-def download_url(url, proxies=None):
-	tmp_fd, tmp_file = tempfile.mkstemp()
-    with os.fdopen(tmp_fd, "wb") as f:
-        http_get(url, f, proxies=proxies)
-    return tmp_file
-```
-
-​		这里返回的 `tmp_file` 会被 `resolved_config_file` 接收，根据 `gguf_file` 的标记，可能会被 `load_gguf_checkpoint()` 或 `_dict_from_json_file()` 方法处理。
-
 ## 加载权重参数
 
-​		在 `_BaseAutoModelClass.from_pretrained()` 方法中， 
+​		在 `_BaseAutoModelClass.from_pretrained()` 方法中， 无论是远程模型还是本地模型，最后都是通过 `model_calss.from_pretrained()` 方法来将权重参数赋给大模型的。
 
 # Torch
 
