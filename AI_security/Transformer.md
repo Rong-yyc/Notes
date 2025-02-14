@@ -222,7 +222,7 @@ return get_class_in_module(class_name, final_module, force_reload=force_download
 
 ## 加载权重参数
 
-​		在 `_BaseAutoModelClass.from_pretrained()` 方法中， 无论是远程模型还是本地模型，最后都是通过 `model_calss.from_pretrained()` 方法来将权重参数赋给大模型的。
+​		在 `_BaseAutoModelClass.from_pretrained()` 方法中， 无论是远程模型还是本地模型，最后都是通过 `model_clsss.from_pretrained()` 方法来将权重参数赋给大模型的。而实际上 `from_pretrained()` 是写在所有预训练模型类的基类 `PreTrainedModel` 类中的，位于 `transformers/modeling_utils.py` 文件中。子类重写该方法的必要性通常取决于模型的特定需求和功能。
 
 # Torch
 
