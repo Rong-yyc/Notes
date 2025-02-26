@@ -35,32 +35,104 @@
 
 - 模型元信息（`ModelProto`）
   - 计算图（`GraphProto`）
-    - 算子节点（`NodeProto`）
-    - 张量（`TensorProto`）
-    - 输入节点（`ValueInfoProto`）
-    - 输出节点（`ValueInfoProto`）
+    - 计算节点（`NodeProto[]`）
+    - 权重参数（`TensorProto`）
+    - 输入输出张量描述（`ValueInfoProto`）
+    - 节点属性参数（`AttributeProto`）
+  - 算子版本信息（`OperatorSetIdProto`）
+  - 元数据/框架版本（`MetadataPropsProto`）
 
 ​		通过 `Protobuf` 编译器[^2]（``protoc`），`onnx.proto` 可以生成对应编程语言的类库，用于直接操作 ONNX 模型（如加载、修改、保存模型）。生成的类库中会包含：`proto` 文件中定义的数据结构、自动生成的序列化/反序列化方法
 
 ## ModelProto
 
-​		加载了一个 ONNX 后，我们获得的就是一个 `ModelProto`，它包含了一些版本信息，生产者信息和一个 `GraphProto`。
+​		加载了一个 ONNX 后，我们获得的就是一个 `ModelProto`，这是模型层，它包含了：
+
+- ir_version：模型格式版本号（如 ONNX 1.7）
+- producer_name：生成框架信息（如 PyTorch 1.8）
+- graph：核心计算图结构 `GraphProto`。
 
 ## GraphProto
 
-​		在 `GraphProto` 中又包含了四个 repeated 数组，分别是 node (`NodeProto`类型)，input (`ValueInfoProto`类型)，output (`ValueInfoProto`类型) 和 initialize (`TensorProto`类型)
+​		在 `GraphProto` 中又包含了四个 repeated 数组，分别是 node (`NodeProto`类型)，input (`ValueInfoProto`类型)，output (`ValueInfoProto`类型) 和 initializer (`TensorProto`类型)
 
-- node 中存放了模型中的所有计算节点
-- input 中存放了模型的输入节点
-- output 中存放了模型的所有输出节点
-- initialize 中存放了模型的所有权重参数
+```python
+# 典型结构示例
+graph {
+  name: "resnet50"
+  input { name: "input.1" type { tensor_type {...} } }
+  output { name: "output.1" type { tensor_type {...} } }
+  node {
+    op_type: "Conv" 
+    input: "input.1"
+    input: "conv1.weight"
+    output: "conv1_output"
+    attribute { name: "strides" ints: 2 }
+  }
+  initializer {  // 存储权重参数
+    name: "conv1.weight" 
+    data_type: FLOAT
+    dims: [64,3,7,7]
+    raw_data: <binary>
+  }
+}
+```
+
+- 节点（`NodeProto`）：每个算子对应一个节点，记录算子类型（如Conv）、输入输出张量名称、属性参数（如 stride = 2）
+- 输入输出张量描述（`ValueInfoProto`）：定义输入/输出张量的形状和类型（如 float32 [1, 3, 224 ,224]）
+- 初始化器（`TensorProto`）：存储权重参数的二进制数据，支持FP16/INT8等量化格式
 
 [^2]: **Protocol Buffer 编译器（protoc）** 是 Google 为 Protocol Buffers 设计的专用工具，用于将 `.proto` 文件（定义数据结构的接口描述文件）编译成目标编程语言的代码（如 Python、C++、Java 等）。生成的代码提供了序列化（对象转二进制）和反序列化（二进制转对象）的接口，使开发者无需手动处理二进制数据的底层细节。
 
+## OperatorSetIdProto
+
+​		声明使用的算子集版本（如 `opset_version=13`），确保不同框架转换时的版本兼容性
+
 # 拓扑关系
 
-​		拓扑关系在ONNX中是如何表示的呢？ONNX的每个计算节点都会有 `input` 和 `output` 两个数组，这两个数组是string类型，通过 `input` 和 `output `的指向关系，就可以利用上述信息快速构建出一个深度学习模型的拓扑图。
+​		每个计算节点（`NodeProto`）的`input`和`output`数组本质上是字符串类型的张量名称标识符，通过 `input` 和 `output `的指向关系，就可以利用上述信息快速构建出一个深度学习模型的拓扑图。
 
-​		这里要注意一下，`GraphProto` 中的 `input` 数组不仅包含一般理解中的计算图输入的那个节点，还包含了模型中所有的权重。例如，`Conv` 层里面的 `W `权重实体是保存在 `initializer` 中的，那么相应的会有一个同名的输入在 `input` 中，其背后的逻辑应该是把权重也看成模型的输入，并通过 `initializer` 中的权重实体来对这个输入做初始化，即一个赋值的过程。
+```protobuf
+input { name: "conv1.weight" type { tensor_type {...} } }
+node {
+  op_type: "Conv"
+  input: "input_data", "conv1.weight"
+  output: "conv1_output"
+}
+```
 
-​		最后，每个计算节点中还包含了一个 `AttributeProto` 数组，用来描述该节点的属性，比如 `Conv` 节点或者说卷积层的属性包含 `group`，`pad`，`strides` 等等，每一个计算节点的属性，输入输出信息都详细记录在[Operators.md](https://github.com/onnx/onnx/blob/master/docs/Operators.md)。
+​		这里要注意一下，`GraphProto`的`input`字段包含的不仅是传统意义上的数据输入节点，还包括**所有权重参数的逻辑入口**。这种设计源于ONNX将权重视为"隐式输入"的特殊处理：
+
+- **权重存储分离**：实际权重数据存放于`initializer`数组中（如`TensorProto`类型的`conv1.weight`）
+- 输入别名映射：`input` 数组会为每个`initializer` 创建同名条目，例如：
+
+```protobuf
+input { name: "conv1.weight" type { tensor_type {...} } }
+initializer { name: "conv1.weight" data_type: FLOAT ... }
+```
+
+​		这种设计实现了权重参数的"声明与赋值分离"，既保持了计算图的逻辑完整性，又支持运行时的高效参数加载
+
+​		最后，每个计算节点中还包含了一个 `AttributeProto` 数组，用来描述该节点的属性，采用键值对形式描述算子的超参数，以卷积层为例
+
+```protobuf
+attribute { 
+  name: "strides" 
+  ints: [2, 2] 
+  type: INTS 
+}
+attribute {
+  name: "pads"
+  ints: [1, 1, 1, 1]
+  type: INTS
+}
+```
+
+​		比如 `Conv` 节点或者说卷积层的属性包含 `group`，`pad`，`strides` 等等。
+
+​		每一个计算节点的属性通过强类型定义（INTS/FLOATS/STRING等）确保跨平台一致性。ONNX官方维护的[Operators.md](https://github.com/onnx/onnx/blob/master/docs/Operators.md)文档详细规定了每个算子的：
+
+- 必需/可选属性列表
+- 输入输出张量数量约束
+- 数据类型兼容性规则
+- 不同算子集版本的行为差异
