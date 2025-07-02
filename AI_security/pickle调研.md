@@ -75,7 +75,44 @@ pickletools.dis(s)
 
 # pickle.dumps() 
 
-​		还没有看源码，目前来看，通过一些协议中既定的规则将一个 python 对象转换为一个字节流的字符串，包含数据和操作码，在反序列化的时候通过操作码和既定规则还原对象
+​		在调用`pickle.dumps()`时，根据`pickle.py`文件
+
+![](./images/pickle_all.png)
+
+​		实际上调用的是`_dumps()`方法[^5]。该方法中实际上是调用了`_Pickler.dump()`方法，将序列化后的 obj 放到`io.BytesIO()`中，并返回`io.BytesIO().getvalue()`方法返回的字符串。
+
+​		在`_Pickler.dump()`方法中，实际上调用的是`self.save(obj)`方法，递归的序列化对象 obj，然后写入 `STOP`操作码，源码如下：
+
+```python
+def dump(self, obj):
+    # 调用 self.save(obj) 方法，开始递归地序列化对象 obj
+    self.save(obj)
+    # 写入 STOP 操作码，表示序列化结束
+    self.write(STOP)
+    # 结束帧的写入
+    self.framer.end_framing()
+```
+
+​		而`_Pickler.save()`方法部分源码如下：
+
+```python
+def save(self, obj, save_persistent_id=True):
+    ...
+    reduce = getattr(self, "reducer_override", None)
+    if reduce is not None:
+        rv = reduce(obj)
+    else:
+        ...
+        reduce = getattr(obj, "__reduce_ex__", None)
+        if reduce is not None:
+            rv = reduce(self.proto)
+        else:
+            reduce = getattr(obj, "__reduce__", None)
+            if reduce is not None:
+                rv = reduce()
+```
+
+​		
 
 # pickle.loads() 原理
 
@@ -142,3 +179,5 @@ def _loads(s, /, *, fix_imports=True, encoding="ASCII", errors="strict",
 ​		- 以 args 为参数，执行函数 f，把结果入栈
 
 ​		class 的 `__reduce__` 方法，在 pickle 反序列化的时候会被执行。其底层的编码方法，就是利用了R指令码。
+
+[^5]: 实际上官方更推荐用更快的\_pickle.py模块
