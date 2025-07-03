@@ -1,3 +1,7 @@
-# Notes
-## WebSafety
-Here are some notes when I'm learning web security.
+# 学习笔记
+## Rong
+这里是小镇同学的学习笔记
+
+## Pollyanna
+
+这里是小女友的学习笔记
