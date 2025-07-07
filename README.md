@@ -40,9 +40,9 @@ git push
     git remote -v
     
     # 添加 Gitee 远程仓库
-    git remote add gitee git@gitee.com:your_username/your_repo.git
+    git remote add gitee git@gitee.com:yu-yaochen/Notes.git
     # 添加 GitHub 远程仓库
-    git remote add github git@github.com:your_username/your_repo.git
+    git remote add github git@github.com:Rong-yyc/Notes.git
     ```
 
 2.  **设置别名实现一键推送**
