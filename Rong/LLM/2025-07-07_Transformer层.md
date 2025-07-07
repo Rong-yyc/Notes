@@ -14,7 +14,7 @@ self.layers = nn.ModuleList([MiniMindBlock(l, config) for l in range(self.num_hi
 class MiniMindBlock(nn.Module):
     """继承了 nn.Module 类，好处是接入HuggingFace的生态，也使得代码更简洁"""
     def __init__(self, layer_id: int, config: MiniMindConfig):
-        super().__init__()										# 调用父类的构造方法
+        super().__init__()										# 调用父类的初始化方法
         # 从配置中获取注意力头的数量、隐藏层维度、以及每个注意力头的维度这些基本参数
         self.num_attention_heads = config.num_attention_heads	
         self.hidden_size = config.hidden_size
@@ -62,7 +62,7 @@ def forward(self, hidden_states, position_embeddings, past_key_value=None, use_c
 
 ​		该层需要上一层的输出 `hidden_states, position_dmbeddings` 作为输入。`hidden_states` 自然就是上一层计算得到的隐藏状态，而 `position_embeddings` 则是位置编码，用于 `RoPE`
 
-​		首先存储上一层的输出结果，将上一层输出进行归一化 `self.input_layernorm(hidden_states)`，然后直接调用 Attention 层 `self.self_attn` 计算得到结果，将上一层的结果加上得到残差结果 `hidden_states += residual`，交给 `self.post_attention_layernorm` 层进行输出归一化。最后交给前馈层计算并残差连接得到输出结果
+​		首先存储上一层的输出结果，将上一层输出进行归一化 `self.input_layernorm(hidden_states)`，然后直接调用 Attention 层 `self.self_attn` 计算得到结果，将上一层的输出结果加上得到残差结果 `hidden_states += residual`，交给 `self.post_attention_layernorm` 层进行输出归一化。最后交给前馈层计算并残差连接得到输出结果
 
 ​		这里的输出中：
 
