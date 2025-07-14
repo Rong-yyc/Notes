@@ -177,12 +177,17 @@ xq, xk, xv = (
 
 ```python
 if self.flash and seq_len != 1:
+    # 设置 dropout 的概率，是一种只在模型训练阶段使用的正则化技术，用于防止过拟合，非训练阶段设为 0
     dropout_p = self.dropout if self.training else 0.0
+    # 处理 attention_mask，用于告诉模型哪些地方是有效词元，哪些地方是 padding
     attn_mask = None
     if attention_mask is not None:
+        # 将掩码形状调整为与多头注意力的内部计算维度相匹配的格式
         attn_mask = attention_mask.view(bsz, 1, 1, -1).expand(bsz, self.n_local_heads, seq_len, -1)
+        # 将掩码转换为布尔类型 
         attn_mask = attn_mask.bool() if attention_mask is not None else None
 
+    # 使用内置的函数，完成官方的 Flash Attention 计算
     output = F.scaled_dot_product_attention(xq, xk, xv, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=True)
 else:
     ...
@@ -192,27 +197,30 @@ else:
 
 > **备注：**`Flash Attention` 的主要优势在于它通过 `tiling`（分块）和重新计算的技术来避免实例化巨大的 `(seq_len, seq_len)` 注意力矩阵，从而大大减少了显存占用和 IO 开销，在 `seq_len` 比较长的时候非常显著。但是，当模型处于自回归生成阶段，每次只处理一个新 token 时，`seq_len` 就等于1。在这种情况下，注意力矩阵只是一个 `(1, d_model)` 的向量，本身并不大，`Flash Attention` 的复杂调度机制反而可能没有传统的实现快。
 
-​		
-
 ```python
 else:
+    # 计算注意力分数
     scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
     scores = scores + torch.triu(
         torch.full((seq_len, seq_len), float("-inf"), device=scores.device),
         diagonal=1
     ).unsqueeze(0).unsqueeze(0)  # scores+mask
 
+    # 手动应用注意力掩码
     if attention_mask is not None:
         extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
         extended_attention_mask = (1.0 - extended_attention_mask) * -1e9
         scores = scores + extended_attention_mask
 
+    # 进行归一化
     scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+    # 正则化防止过拟合
     scores = self.attn_dropout(scores)
+    # 最后与 xv 相乘
     output = scores @ xv
 ```
 
-​		
+​		这部分代码实现的是标准的、手动的缩放点积注意力算法：通过矩阵乘法计算得分，缩放，手动应用掩码，进行 `softmax` 归一化后，再与 `xv` 相乘得到输出
 
 ```python
 output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
@@ -231,3 +239,7 @@ return output, past_kv
 2、位置编码的原理是什么？
 
 答：通过将词元的绝对位置或相对位置加入计算，并将得到的结果一起参与计算，就能隐式的将词元的位置信息给到神经网络
+
+# Q、K、V矩阵
+
+​		
