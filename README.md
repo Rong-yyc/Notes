@@ -1,10 +1,12 @@
 # 学习笔记
+
 ## Rong
-这里是小镇同学的学习笔记
+
+​		这里是小镇同学的学习笔记
 
 ## Pollyanna
 
-这里是小女友的学习笔记
+​		这里是小女友的学习笔记
 
 ---
 
@@ -38,7 +40,7 @@ git push
     ```bash
     # 查看当前的远程仓库地址
     git remote -v
-    
+
     # 添加 Gitee 远程仓库
     git remote add gitee git@gitee.com:yu-yaochen/Notes.git
     # 添加 GitHub 远程仓库
@@ -59,3 +61,31 @@ git push
     ```bash
     git pushall
     ```
+
+## Python venv
+
+### 常用命令
+
+```shell
+# 创建虚拟环境，通常直接放在项目根目录下
+python -m venv <虚拟环境路径>
+
+# 激活该虚拟环境
+# Windows (cmd.exe)
+<虚拟环境路径>\Scripts\activate.bat
+# Windows (PowerShell)
+<虚拟环境路径>\Scripts\Activate.ps1
+
+# Linux/macOS
+source <虚拟环境路径>/bin/activate
+
+# 关掉虚拟环境
+deactivate
+
+# 删除虚拟环境
+# 删除虚拟环境只需要直接删除对应的文件夹即可
+# Windows
+rmdir /s /q <虚拟环境路径>
+# Linux/macOS
+rm -rf <虚拟环境路径>
+```

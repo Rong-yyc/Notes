@@ -173,11 +173,9 @@ xq, xk, xv = (
 )
 ```
 
-​		这段代码实现了 GQA（分组查询注意力）。在这种模式下，会有一些注意力头共享 KV 矩阵，也就是说 Query 的头数多于 KeyValue 的头数
+​		这段代码实现了 GQA（分组查询注意力）。在这种模式下，会有一些注意力头共享 KV 矩阵，也就是说 Query 的头数多于 KeyValue 的头数。这里使用 `repeat_kv` 函数将 KV 头重复多次，使其头数与 `xq` 的头数匹配。然后交换三个矩阵的第一个和第二个维度，目的是为了使用高效的库函数，及下面的 `scaled_dot_product_attention` 函数。这种库函数通常要求张量的形状是 `[bsz, num_heads, seq_len, head_dim]`
 
 ```python
-
-
 if self.flash and seq_len != 1:
     dropout_p = self.dropout if self.training else 0.0
     attn_mask = None
@@ -186,6 +184,17 @@ if self.flash and seq_len != 1:
         attn_mask = attn_mask.bool() if attention_mask is not None else None
 
     output = F.scaled_dot_product_attention(xq, xk, xv, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=True)
+else:
+    ...
+```
+
+​		这段部分代码实际上就是注意力计算的核心部分，其中 `if` 分支处理的是启用 Flash Attention[^1] 且序列长度不为 1（通常是第一次处理 prompt）的情况， `else` 分支处理的是未使用 `Flash Attention` 时的标准手动实现。使用了 `PyTorch` 2.0 版本及以上提供的 `Flash Attention` 来高效的完成注意力分数的计算和加权求和。
+
+> **备注：**`Flash Attention` 的主要优势在于它通过 `tiling`（分块）和重新计算的技术来避免实例化巨大的 `(seq_len, seq_len)` 注意力矩阵，从而大大减少了显存占用和 IO 开销，在 `seq_len` 比较长的时候非常显著。但是，当模型处于自回归生成阶段，每次只处理一个新 token 时，`seq_len` 就等于1。在这种情况下，注意力矩阵只是一个 `(1, d_model)` 的向量，本身并不大，`Flash Attention` 的复杂调度机制反而可能没有传统的实现快。
+
+​		
+
+```python
 else:
     scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
     scores = scores + torch.triu(
@@ -201,11 +210,17 @@ else:
     scores = F.softmax(scores.float(), dim=-1).type_as(xq)
     scores = self.attn_dropout(scores)
     output = scores @ xv
+```
 
+​		
+
+```python
 output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
 output = self.resid_dropout(self.o_proj(output))
 return output, past_kv
 ```
+
+[^1]: `PyTorch` 2.0 及以上版本提供 `Flash Attention` 来高效的完成注意力分数的计算和加权求和。（通过 `scaled_dot_product_attention` 函数实现） ↩
 
 ## Q&A
 
