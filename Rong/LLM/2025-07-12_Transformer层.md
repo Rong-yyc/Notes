@@ -132,61 +132,79 @@ def forward(self, x: torch.Tensor, 				# 输入
 
 - `attention_mask`：掩码（处理padding等）
 
+
+​		获取输入的形状，拿到 `batch_size, seq_len` 等信息
+
 ```python
-def forward(self,
-                x: torch.Tensor,
-                position_embeddings: Tuple[torch.Tensor, torch.Tensor],  # 修改为接收cos和sin
-                past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-                use_cache=False,
-                attention_mask: Optional[torch.Tensor] = None):
-        bsz, seq_len, _ = x.shape
-        xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
-        xq = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)
-        xk = xk.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)
+xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+xq = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)
+xk = xk.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)
+xv = xv.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)
+```
 
-        cos, sin = position_embeddings
-        xq, xk = apply_rotary_pos_emb(xq, xk, cos[:seq_len], sin[:seq_len])
+​		将输入张量 x（通常是词嵌入和位置编码的组合）通过三个独立的线性层进行线性变换，分别生成查询（Query, xq）、键（Key, xk）和值（Value, xv）这三个向量。
 
-        # kv_cache实现
-        if past_key_value is not None:
-            xk = torch.cat([past_key_value[0], xk], dim=1)
-            xv = torch.cat([past_key_value[1], xv], dim=1)
-        past_kv = (xk, xv) if use_cache else None
+​		接下来三行是对这三个向量进行 `reshape`，主要是为了实现多注意力，将原始的 `[bsz, seq_len, d_model]` 的向量拆分为 `n_local_heads` 个低维度的”头“，每个头的维度是 `head_dim`，得到一个 `[bsz, seq_len, n_local_heads, head_dim]` 形状的张量
 
-        xq, xk, xv = (
-            xq.transpose(1, 2),
-            repeat_kv(xk, self.n_rep).transpose(1, 2),
-            repeat_kv(xv, self.n_rep).transpose(1, 2)
-        )
+```python
+cos, sin = position_embeddings
+xq, xk = apply_rotary_pos_emb(xq, xk, cos[:seq_len], sin[:seq_len])
+```
 
-        if self.flash and seq_len != 1:
-            dropout_p = self.dropout if self.training else 0.0
-            attn_mask = None
-            if attention_mask is not None:
-                attn_mask = attention_mask.view(bsz, 1, 1, -1).expand(bsz, self.n_local_heads, seq_len, -1)
-                attn_mask = attn_mask.bool() if attention_mask is not None else None
+​		从预计算好的 `position_embeddings` 中取出 `cos` 和 `sin` 两个大表
 
-            output = F.scaled_dot_product_attention(xq, xk, xv, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=True)
-        else:
-            scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
-            scores = scores + torch.triu(
-                torch.full((seq_len, seq_len), float("-inf"), device=scores.device),
-                diagonal=1
-            ).unsqueeze(0).unsqueeze(0)  # scores+mask
+​		然后调用 `apply_rotary_pos_emb` 函数将位置信息”旋转”到查询张量和键向量中
 
-            if attention_mask is not None:
-                extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
-                extended_attention_mask = (1.0 - extended_attention_mask) * -1e9
-                scores = scores + extended_attention_mask
+```python
+# kv_cache实现
+if past_key_value is not None:
+    xk = torch.cat([past_key_value[0], xk], dim=1)
+    xv = torch.cat([past_key_value[1], xv], dim=1)
+past_kv = (xk, xv) if use_cache else None
+```
 
-            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-            scores = self.attn_dropout(scores)
-            output = scores @ xv
+​		这部分代码主要用于实现 `kv_cache`，如果设定了 `use_cache` 为 True，则每次计算出 `xk` 和 `xv` 后，将其记录在 `past_kv` 中。这里的 `past_key_value` 是由框架负责传递的参数，在预测第一个 token 时，就是 None。第二轮及以后，框架就会自动帮你把前一轮的 xk, xv 拼接在 `past_key_value` 中，这样就实现了 `KV` 缓存
 
-        output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
-        output = self.resid_dropout(self.o_proj(output))
-        return output, past_kv
+```python
+xq, xk, xv = (
+    xq.transpose(1, 2),
+    repeat_kv(xk, self.n_rep).transpose(1, 2),
+    repeat_kv(xv, self.n_rep).transpose(1, 2)
+)
+```
+
+​		这段代码实现了 GQA（分组查询注意力）。在这种模式下，会有一些注意力头共享 KV 矩阵，也就是说 Query 的头数多于 KeyValue 的头数
+
+```python
+
+
+if self.flash and seq_len != 1:
+    dropout_p = self.dropout if self.training else 0.0
+    attn_mask = None
+    if attention_mask is not None:
+        attn_mask = attention_mask.view(bsz, 1, 1, -1).expand(bsz, self.n_local_heads, seq_len, -1)
+        attn_mask = attn_mask.bool() if attention_mask is not None else None
+
+    output = F.scaled_dot_product_attention(xq, xk, xv, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=True)
+else:
+    scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
+    scores = scores + torch.triu(
+        torch.full((seq_len, seq_len), float("-inf"), device=scores.device),
+        diagonal=1
+    ).unsqueeze(0).unsqueeze(0)  # scores+mask
+
+    if attention_mask is not None:
+        extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+        extended_attention_mask = (1.0 - extended_attention_mask) * -1e9
+        scores = scores + extended_attention_mask
+
+    scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+    scores = self.attn_dropout(scores)
+    output = scores @ xv
+
+output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
+output = self.resid_dropout(self.o_proj(output))
+return output, past_kv
 ```
 
 ## Q&A
@@ -197,4 +215,4 @@ def forward(self,
 
 2、位置编码的原理是什么？
 
-答：
+答：通过将词元的绝对位置或相对位置加入计算，并将得到的结果一起参与计算，就能隐式的将词元的位置信息给到神经网络
