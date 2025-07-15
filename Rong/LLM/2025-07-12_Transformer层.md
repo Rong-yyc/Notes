@@ -242,4 +242,85 @@ return output, past_kv
 
 # Q、K、V矩阵
 
-​		
+## Q、K、V的生成
+
+​		首先我们要明确，在注意力层中，实际上Q、K、V是通过将输入与三个矩阵 $W_Q,W_K,W_V$ 相乘得到的，这三个矩阵的参数会在训练中不断更新，实现Q、K、V三个矩阵的更新，即
+
+​		$Q=XW_Q, K=XW_K, V=XW_V$
+
+​		这三个矩阵的作用是将输入投影到不同的语义空间，便于后续计算
+
+## Q、K的作用
+
+​		首先，Q 是用来标记当前关注的词元，可以先考虑为单个 token，形状为 `(1, d_model)`，然后需要计算其与其他所有 token 的相关性，而 K 就相当于所有的 token 信息，形状为 `(seq_len, d_model)`，用 $QK^T$ 就能得到一个基础的，当前 token 与所有 token 的相关性。然后要计算每一个 token 与其他所有 token 的关系，所有就是`seq_len` 个 token 与其他所有 token 的关系。所有 Q 矩阵的形状也是 `(seq_len, d_model)`
+
+​		所以总结下来，Q 和 K 是用于得到 token 之间的相关性分数，然后经过缩放（除以 $\sqrt{d_{model}}$）、归一化（`softmax` 归一化）
+
+​		最后将被提取的 “信息” 即为注意力权重
+
+## V的作用
+
+​		其实按道理来说，根据直觉，将注意力权重直接乘以 X 就可以了，为什么还需要 V 矩阵呢？其实是因为在 X 的原始嵌入中可能包括多种混杂信息（如语义、位置、语法等），而 V 通过 $W_V$ 学习到哪些信息时候被注意力机制提取。
+
+*示例：*以 “猫 吃 鱼” 为例，猫的原始嵌入可能编码了 “动物”、“名词” 等信息，而 V 中的 “猫” 可能强化了 “动作发起者” 这一角色
+
+> 所以在注意力层中，Q、K、V都有着自己的作用，Q/K 矩阵用来学习相关性，V 矩阵用来提取更适合被注意力机制使用的信息
+
+## 训练与推理
+
+​		在训练时，更新的是矩阵 $W_Q, W_K, W_V$，在进行推理时不同的输入乘以这三个矩阵会得到不同的Q、K、V矩阵。且由于在生成式任务中，已生成 token 的 K、V 计算并不依赖于未来的 token，所以可以通过缓存的方式，减少每次推理时的计算开销
+
+| 矩阵  | 存储信息类型           | 在“猫吃鱼”中的角色                                           |
+| ----- | ---------------------- | ------------------------------------------------------------ |
+| **Q** | **当前词的“问题”**     | “吃”的 Query 会问：“谁在吃？（主语）”“吃什么？（宾语）”      |
+| **K** | **其他词的“回答标签”** | “猫”的 Key 回答：“我是主语”，“鱼”的 Key 回答：“我是宾语”     |
+| **V** | **其他词的“具体答案”** | “猫”的 Value 提供：“我是猫，动物，施事者”，“鱼”的 Value 提供：“我是鱼，食物，受事者” |
+
+## Q&A
+
+1、为什么需要这三个矩阵？
+
+答：**灵活性**：Q/K 负责动态匹配关系，V 负责编码具体信息，解耦后模型能更高效地学习不同功能。  
+
+​      **可解释性**：例如，某些注意力头可能专门让动词关注主语（通过 Q-K 匹配），而 Value 提供主语的语义细节。
+
+# 前馈层（Feed-Forward Network，FFN）
+
+​		自注意力机制本身虽然非常强大，但其核心计算在很大程度上是线性的。如果模型中只有线性的计算，那么无论堆叠多少层，其最终效果也等同于一个单层的线性模型，这将极大地限制模型的表达能力。前馈层就是为了解决这个问题，引入了一个非线性激活函数，打破了这种线性。
+
+## \_\_init\_\_方法
+
+```python
+class FeedForward(nn.Module):
+    def __init__(self, config: MiniMindConfig):
+        super().__init__()
+        if config.intermediate_size is None:
+            intermediate_size = int(config.hidden_size * 8 / 3)
+            config.intermediate_size = 64 * ((intermediate_size + 64 - 1) // 64)
+        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
+        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
+        self.dropout = nn.Dropout(config.dropout)
+        self.act_fn = ACT2FN[config.hidden_act]
+```
+
+​		这段代码首先判断是否已经指定了前馈层大小，如果没有则将 `hidden_size` 乘以 8/3，这是一个在现代大语言模型中被证明行之有效的经验法则，然后将计算出的 `intermediate_size` 向上取整到最接近的 64 的倍数。
+
+​		紧接着是初始化网络层，定义了三个线性层和一个激活函数层，它们共同实现了一种名为 `SwiGLU (Swish Gated Linear Unit)` 的先进激活机制。
+
+- `self.gate_proj`：门控投影层，将输入从 `hidden_size` 扩展到更大的 `intermediate_size`
+- `self.up_proj`：上投影层，与 `gate_proj` 并行，也执行相同的维度扩展
+- `self.down_proj`：下投影层，在经过门控和激活函数处理后，它负责将维度从 `intermediate_size` 压缩回原始的 `hidden_size`
+- `self.dropout`：定义了一个标准的 Dropout 层，用于正则化，防止过拟合
+- `self.act_fun`：从 transformers 库中获取激活函数，根据配置文件使用的是 `silu`
+
+##  forward方法
+
+```python
+def forward(self, x):
+    return self.dropout(self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x)))
+```
+
+​		这里就完美的实现了 “门控机制”[^2]。`self.up_proj` 是数据通路，承载着主要信息。`self.act_fn(self.gate_proj(x))` 是门控通路，将其相乘就是通过门控向量，动态的筛选调节，逐个元素地去控制数据通路中信息的去留和强弱
+
+[^2]: 门控机制是神经网络学会的一种“注意力”或“控制”能力，使其能够智能地、动态地筛选和调节其内部处理的信息。就像在出水处装了一个水龙头，可以控制水流开关以及大小，如果没有则只有开关
